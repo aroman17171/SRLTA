@@ -25,8 +25,8 @@ except ImportError:
     print("ERROR: pyacsm not installed")
     print("Install: pip install pyacsm")
 
-from src.telemetry_loader import TelemetryLoader
-from src.corner_detection import detect_corners_advanced
+from telemetry.telemetry_loader import TelemetryLoader
+from analysis.corner_detection import detect_corners_advanced
 from src.live_telemetry import LiveDeltaCalculator, LiveCoachingSystem
 
 

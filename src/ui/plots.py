@@ -8,8 +8,7 @@ import matplotlib.patches as mpatches
 from matplotlib.gridspec import GridSpec
 import numpy as np
 from typing import List, Optional
-from src.corner_detection import Corner
-
+from src.analysis.corner_detection import Corner
 
 def plot_comprehensive_analysis(
     lap1_data,

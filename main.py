@@ -1,42 +1,95 @@
 """
 SRLTA - Sim Racing Lap Time Analyzer
-Main entry point for telemetry analysis
 """
 
 import sys
 from pathlib import Path
-
-# Import upgraded modules
-from src.telemetry_loader import TelemetryLoader
-from src.delta import (
+from src.telemetry.recorder import ACTelemetryStream
+from src.telemetry.loader import TelemetryLoader
+from src.analysis.delta import (
     calculate_time_delta,
     calculate_delta_statistics,
     find_significant_delta_zones,
     generate_coaching_message
 )
-from src.corner_detection import detect_corners_advanced, analyze_corner_performance
-from src.visualization import (
-    plot_comprehensive_analysis,
-    plot_corner_analysis,
-    save_plots
-)
+from src.analysis.corner_detection import detect_corners_advanced, analyze_corner_performance
+from src.ui.plots import plot_comprehensive_analysis, plot_corner_analysis, save_plots
 import matplotlib.pyplot as plt
 
 
+def live_mode():
+    print("=" * 60)
+    print("SRLTA - Live Mode")
+    print("=" * 60)
+    print("Drive normally. Each completed lap will be saved and analyzed.")
+    print("Ctrl+C to stop.\n")
+
+    from src.voice.speaker import Speaker
+    speaker = Speaker()
+    speaker.test()  # confirms voice is working when you start
+
+    stream = ACTelemetryStream()
+    best_lap_path = "data/best_lap.csv"
+    lap_number = 1
+
+    def on_frame(frame):
+        print(f"\r  Speed: {frame['speed']:6.1f} km/h  "
+              f"Dist: {frame['distance']:6.0f}m  "
+              f"Lap: {frame['lap']}  "
+              f"Time: {frame['lap_time']:.1f}s", end="")
+
+    def on_lap_complete(frames):
+        nonlocal lap_number, best_lap_path
+        print(f"\n\n✓ Lap {lap_number} complete — {len(frames)} frames recorded")
+        
+        lap_path = f"data/lap_{lap_number}.csv"
+        stream.save_lap(frames, lap_path)
+
+        if Path(best_lap_path).exists():
+            print("  Comparing to best lap...")
+            try:
+                ref = TelemetryLoader.load(best_lap_path)
+                current = TelemetryLoader.load(lap_path)
+                distances, delta = calculate_time_delta(ref, current)
+                stats = calculate_delta_statistics(delta, distances)
+                zones = find_significant_delta_zones(delta, distances)
+
+                # Print to terminal
+                coaching = generate_coaching_message(stats, zones)
+                print(coaching)
+
+                # Speak it
+                speaker.say_lap_result(stats, zones)
+
+                # Update best lap if this one is faster
+                if stats['total_delta'] < 0:
+                    import shutil
+                    shutil.copy(lap_path, best_lap_path)
+                    print("  New best lap saved!")
+                    #speaker.say("New best lap!", interrupt=False)
+
+            except Exception as e:
+                print(f"  Could not compare: {e}")
+        else:
+            import shutil
+            shutil.copy(lap_path, best_lap_path)
+            print("  First lap saved as reference. Drive another lap to compare!")
+            speaker.say("First lap recorded. Drive another lap to compare.")
+
+        lap_number += 1
+
+    try:
+        stream.stream(callback=on_frame, on_lap_complete=on_lap_complete)
+    except KeyboardInterrupt:
+        stream.stop()
+        print("\n\nStopped.")
+
+
 def analyze_laps(lap1_path: str, lap2_path: str, detection_method: str = "multi_channel"):
-    """
-    Complete lap comparison analysis.
-    
-    Args:
-        lap1_path: Path to reference lap telemetry
-        lap2_path: Path to comparison lap telemetry
-        detection_method: Corner detection method ("multi_channel", "brake_points", "speed_only")
-    """
     print("=" * 60)
     print("SRLTA - Sim Racing Lap Time Analyzer")
     print("=" * 60)
-    
-    # Load telemetry
+
     print(f"\n📊 Loading telemetry data...")
     try:
         lap1 = TelemetryLoader.load(lap1_path)
@@ -50,8 +103,7 @@ def analyze_laps(lap1_path: str, lap2_path: str, detection_method: str = "multi_
     except Exception as e:
         print(f"✗ Error loading telemetry: {e}")
         return
-    
-    # Calculate delta
+
     print(f"\n⏱️  Calculating time delta...")
     try:
         distances, delta = calculate_time_delta(lap1, lap2)
@@ -63,102 +115,64 @@ def analyze_laps(lap1_path: str, lap2_path: str, detection_method: str = "multi_
         import traceback
         traceback.print_exc()
         return
-    
-    # Detect corners
+
     print(f"\n🏁 Detecting corners using '{detection_method}' method...")
     try:
         corners = detect_corners_advanced(lap1, method=detection_method)
-        print(f"✓ Detected {len(corners)} corners:")
-        for i, corner in enumerate(corners, 1):
-            print(f"  {i}. {corner}")
+        print(f"✓ Detected {len(corners)} corners")
     except Exception as e:
         print(f"✗ Error detecting corners: {e}")
         corners = []
-    
-    # Analyze corner performance
+
     if corners:
         print(f"\n📈 Analyzing corner performance...")
         try:
             corner_perf = analyze_corner_performance(lap1, lap2, corners)
-            for perf in corner_perf:
-                status = {
-                    'better_apex': '✓',
-                    'better_exit': '✓',
-                    'better_braking': '✓',
-                    'similar': '≈'
-                }.get(perf['performance'], '?')
-                print(f"  Corner {perf['corner_number']}: {status} {perf['performance']}")
         except Exception as e:
             print(f"✗ Error analyzing corners: {e}")
             corner_perf = []
     else:
         corner_perf = []
-    
-    # Generate coaching message
+
     print(f"\n💬 Analysis Summary:")
     print("-" * 60)
-    coaching = generate_coaching_message(stats, zones)
-    print(coaching)
+    print(generate_coaching_message(stats, zones))
     print("-" * 60)
-    
-    # Create visualizations
+
     print(f"\n📊 Creating visualizations...")
     try:
-        # Main analysis plot
         fig1 = plot_comprehensive_analysis(
-            lap1, lap2,
-            distances, delta,
+            lap1, lap2, distances, delta,
             corners=corners if corners else None,
             stats=stats
         )
-        
         figures = {'analysis': fig1}
-        
-        # Corner-by-corner plot if corners detected
         if corners and corner_perf:
-            fig2 = plot_corner_analysis(lap1, lap2, corners, corner_perf)
-            figures['corners'] = fig2
-        
-        print(f"✓ Created {len(figures)} visualization(s)")
-        
-        # Save plots
+            figures['corners'] = plot_corner_analysis(lap1, lap2, corners, corner_perf)
         save_plots(figures, output_dir="output")
-        
-        # Show plots
         plt.show()
-        
     except Exception as e:
         print(f"✗ Error creating visualizations: {e}")
         import traceback
         traceback.print_exc()
-    
+
     print("\n✓ Analysis complete!")
 
 
 def main():
-    """Main entry point"""
-    # Default paths
-    lap1_path = "data/lap1.csv"
-    lap2_path = "data/lap2.csv"
-    
-    # Check if custom paths provided
-    if len(sys.argv) >= 3:
-        lap1_path = sys.argv[1]
-        lap2_path = sys.argv[2]
-    
-    # Check if paths exist
-    if not Path(lap1_path).exists():
-        print(f"Error: Lap 1 file not found: {lap1_path}")
-        print("\nUsage: python main.py [lap1.csv] [lap2.csv]")
+    if "--live" in sys.argv:
+        live_mode()
         return
-    
-    if not Path(lap2_path).exists():
-        print(f"Error: Lap 2 file not found: {lap2_path}")
-        print("\nUsage: python main.py [lap1.csv] [lap2.csv]")
+    if "--analyze" in sys.argv:
+        # existing analysis mode
+        lap1_path = sys.argv[2] if len(sys.argv) > 2 else "data/lap1.csv"
+        lap2_path = sys.argv[3] if len(sys.argv) > 3 else "data/lap2.csv"
+        analyze_laps(lap1_path, lap2_path)
         return
-    
-    # Run analysis
-    analyze_laps(lap1_path, lap2_path)
+
+    # Default — launch GUI
+    from src.ui.dashboard import run
+    run()
 
 
 if __name__ == "__main__":
