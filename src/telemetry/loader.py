@@ -17,11 +17,27 @@ class TelemetryData:
     Standardized telemetry data container.
     All loaders convert to this format for consistent analysis.
     """
-    
+    def get_speed_at_distance(self, target_distance):
+        idx = min(range(len(self.distance)),
+                key=lambda i: abs(self.distance[i] - target_distance))
+        return self.speed[idx]
+
+    def get_brake_at_distance(self, target_distance):
+        if not hasattr(self, "brake"):
+            return 0
+
+        idx = min(range(len(self.distance)),
+                key=lambda i: abs(self.distance[i] - target_distance))
+        return self.brake[idx]
+
     def __init__(self, data: pd.DataFrame, metadata: Optional[Dict] = None):
         self.data = data
         self.metadata = metadata or {}
         self._validate()
+        # Expose distance/speed/brake as numpy attributes for fast lookup helpers
+        self.distance = self.data['distance'].to_numpy() if 'distance' in self.data.columns else None
+        self.speed = self.data['speed'].to_numpy() if 'speed' in self.data.columns else None
+        self.brake = self.data['brake'].to_numpy() if 'brake' in self.data.columns else None
     
     def _validate(self):
         """Ensure required channels exist"""

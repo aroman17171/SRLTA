@@ -1,7 +1,12 @@
 pyaccsharedmemory
 pyttsx3
+edge-tts
+playsound3
 customtkinter
 pandas
 numpy
+scipy
 pywin32
 comtypes
+
+

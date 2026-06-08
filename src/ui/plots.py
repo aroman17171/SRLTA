@@ -10,6 +10,21 @@ import numpy as np
 from typing import List, Optional
 from src.analysis.corner_detection import Corner
 
+def plot_track_map(telemetry_data, corners=None):
+    # Force ensure pos_x/pos_y exist by extracting from data if available
+    if not telemetry_data.has_channel('pos_x') and 'pos_x' in telemetry_data.data.columns:
+        # already there
+        pass
+    elif 'pos_x' in telemetry_data.data.columns:
+        # good
+        pass
+    else:
+        print("❌ Track map: pos_x/pos_y missing. Cannot draw.")
+        return None
+    
+    x = telemetry_data.get_channel('pos_x')
+    y = telemetry_data.get_channel('pos_y')
+    
 def plot_comprehensive_analysis(
     lap1_data,
     lap2_data,

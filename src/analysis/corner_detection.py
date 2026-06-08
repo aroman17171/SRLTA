@@ -327,6 +327,11 @@ def analyze_corner_performance(
     d2 = lap2_data.get_channel('distance')
     s2 = lap2_data.get_channel('speed')
     
+    # Build racing line from reference lap if position data available
+    racing_line = None
+    if lap1_data.has_channel('pos_x') and lap1_data.has_channel('pos_z'):
+        racing_line = _build_racing_line(lap1_data, corners)
+    
     for i, corner in enumerate(corners):
         # Find indices for this corner in both laps
         entry1 = np.argmin(np.abs(d1 - corner.entry_distance))
@@ -351,18 +356,202 @@ def analyze_corner_performance(
             performance = "better_braking"
         else:
             performance = "similar"
+            
+        exit_speed_loss = max(0, s1[exit1] - s2[exit2])  # lap2 slower on exit
+
+        # Physically correct time loss estimate
+        exit_zone = 50.0  # meters after apex
+        avg_speed_ms = max(s1[apex1] / 3.6, 1.0)
+        ref_exit_speed = max(s1[exit1], 1.0)
+        time_lost = round((exit_zone / avg_speed_ms) * (exit_speed_loss / ref_exit_speed), 2)
+        time_lost = min(time_lost, 0.8)  # Cap at 0.8s per corner
         
+        brake_diff_m = 0.0
+        if lap1_data.has_channel('brake') and lap2_data.has_channel('brake'):
+            b1 = lap1_data.get_channel('brake')
+            b2 = lap2_data.get_channel('brake')
+            # Search backwards from apex for first hard brake (>0.3) in a 200m window
+            search_start1 = max(0, entry1 - 40)
+            search_start2 = max(0, entry2 - 40)
+
+            brake_idx1 = entry1
+            for j in range(entry1, search_start1, -1):
+                if b1[j] > 0.3:
+                    brake_idx1 = j
+                    break
+
+            brake_idx2 = entry2
+            for j in range(entry2, search_start2, -1):
+                if b2[j] > 0.3:
+                    brake_idx2 = j
+                    break
+
+            brake_diff_m = round(d1[brake_idx1] - d2[brake_idx2], 1)
+        
+        # Calculate racing line deviation if position data available
+        line_deviation_entry = 0.0
+        line_deviation_apex = 0.0
+        line_deviation_exit = 0.0
+        avg_deviation = 0.0
+        
+        if racing_line is not None and lap2_data.has_channel('pos_x') and lap2_data.has_channel('pos_z'):
+            line_dev = _calculate_line_deviation(lap2_data, racing_line, corner)
+            line_deviation_entry = line_dev.get('entry', 0.0)
+            line_deviation_apex = line_dev.get('apex', 0.0)
+            line_deviation_exit = line_dev.get('exit', 0.0)
+            avg_deviation = line_dev.get('avg', 0.0)
+
         analysis.append({
             'corner_number': i + 1,
             'apex_distance': corner.apex_distance,
             'corner_type': corner.corner_type,
-            'entry_speed_diff': entry_speed_diff,
-            'apex_speed_diff': apex_speed_diff,
-            'exit_speed_diff': exit_speed_diff,
-            'performance': performance
+            'entry_speed_diff': round(float(entry_speed_diff), 1),
+            'apex_speed_diff':  round(float(apex_speed_diff), 1),
+            'exit_speed_diff':  round(float(exit_speed_diff), 1),
+            'performance': performance,
+            'time_lost': time_lost,
+            'brake_diff_m': brake_diff_m,
+            'line_deviation_entry': round(line_deviation_entry, 1),
+            'line_deviation_apex': round(line_deviation_apex, 1),
+            'line_deviation_exit': round(line_deviation_exit, 1),
+            'line_deviation_avg': round(avg_deviation, 1),
         })
     
     return analysis
+
+
+def _build_racing_line(telemetry_data, corners: List[Corner]) -> Dict:
+    """
+    Build a racing line model from reference lap position data.
+    Creates a parametric curve through X/Z positions at each distance.
+    """
+    distance = telemetry_data.get_channel('distance')
+    pos_x = telemetry_data.get_channel('pos_x')
+    pos_z = telemetry_data.get_channel('pos_z')
+    
+    # Create interpolation functions for the racing line
+    from scipy import interpolate
+    
+    # Only use valid (non-zero) positions
+    valid_mask = (pos_x != 0) | (pos_z != 0)
+    if not np.any(valid_mask):
+        return None
+    
+    valid_dist = distance[valid_mask]
+    valid_x = pos_x[valid_mask]
+    valid_z = pos_z[valid_mask]
+    
+    if len(valid_dist) < 10:
+        return None
+    
+    # Sort by distance
+    sort_idx = np.argsort(valid_dist)
+    valid_dist = valid_dist[sort_idx]
+    valid_x = valid_x[sort_idx]
+    valid_z = valid_z[sort_idx]
+    
+    # Create spline interpolation for the racing line
+    try:
+        # Use cubic spline for smooth racing line
+        x_spline = interpolate.UnivariateSpline(valid_dist, valid_x, k=min(3, len(valid_dist)-1), s=len(valid_dist))
+        z_spline = interpolate.UnivariateSpline(valid_dist, valid_z, k=min(3, len(valid_dist)-1), s=len(valid_dist))
+        
+        return {
+            'distance': valid_dist,
+            'x': valid_x,
+            'z': valid_z,
+            'x_spline': x_spline,
+            'z_spline': z_spline,
+        }
+    except Exception:
+        return None
+
+
+def _calculate_line_deviation(lap2_data, racing_line: Dict, corner: Corner) -> Dict:
+    """
+    Calculate lateral deviation from the racing line for a specific corner.
+    Returns deviation at entry, apex, exit, and average.
+    """
+    d2 = lap2_data.get_channel('distance')
+    pos_x = lap2_data.get_channel('pos_x')
+    pos_z = lap2_data.get_channel('pos_z')
+    
+    # Sample points across the corner zone
+    corner_start = corner.entry_distance
+    corner_end = corner.exit_distance
+    
+    # Find indices in the lap data for this corner
+    mask = (d2 >= corner_start) & (d2 <= corner_end)
+    if not np.any(mask):
+        return {'entry': 0.0, 'apex': 0.0, 'exit': 0.0, 'avg': 0.0}
+    
+    corner_dist = d2[mask]
+    corner_x = pos_x[mask]
+    corner_z = pos_z[mask]
+    
+    # Filter out invalid positions
+    valid = (corner_x != 0) | (corner_z != 0)
+    if not np.any(valid):
+        return {'entry': 0.0, 'apex': 0.0, 'exit': 0.0, 'avg': 0.0}
+    
+    corner_dist = corner_dist[valid]
+    corner_x = corner_x[valid]
+    corner_z = corner_z[valid]
+    
+    x_spline = racing_line['x_spline']
+    z_spline = racing_line['z_spline']
+    
+    deviations = []
+    entry_dev = apex_dev = exit_dev = 0.0
+    
+    for dist, x, z in zip(corner_dist, corner_x, corner_z):
+        try:
+            # Get ideal racing line position at this distance
+            ideal_x = float(x_spline(dist))
+            ideal_z = float(z_spline(dist))
+            
+            # Calculate lateral deviation (perpendicular distance to racing line)
+            # We approximate lateral direction using tangent to racing line
+            eps = 0.1  # Small distance to estimate tangent
+            if dist + eps <= racing_line['distance'][-1]:
+                tangent_x = float(x_spline(dist + eps)) - ideal_x
+                tangent_z = float(z_spline(dist + eps)) - ideal_z
+            else:
+                tangent_x = ideal_x - float(x_spline(dist - eps))
+                tangent_z = ideal_z - float(z_spline(dist - eps))
+            
+            tangent_len = np.sqrt(tangent_x**2 + tangent_z**2)
+            if tangent_len > 1e-6:
+                # Normal vector (pointing to the right of track direction)
+                normal_x = -tangent_z / tangent_len
+                normal_z = tangent_x / tangent_len
+                
+                # Vector from ideal position to actual position
+                dx = x - ideal_x
+                dz = z - ideal_z
+                
+                # Project onto normal to get lateral deviation
+                deviation = dx * normal_x + dz * normal_z
+                deviations.append(abs(deviation))
+                
+                # Record deviations at key points
+                if abs(dist - corner.entry_distance) < 5:
+                    entry_dev = abs(deviation)
+                if abs(dist - corner.apex_distance) < 5:
+                    apex_dev = abs(deviation)
+                if abs(dist - corner.exit_distance) < 5:
+                    exit_dev = abs(deviation)
+        except Exception:
+            continue
+    
+    avg_dev = np.mean(deviations) if deviations else 0.0
+    
+    return {
+        'entry': entry_dev,
+        'apex': apex_dev,
+        'exit': exit_dev,
+        'avg': avg_dev,
+    }
 
 
 if __name__ == "__main__":

@@ -1,11 +1,15 @@
+
 """
 SRLTA - Sim Racing Lap Time Analyzer
 """
 
 import sys
+from src.analysis.coach import RealTimeCoach
+from src.analysis.corner_detection import detect_corners_advanced
+from src.telemetry.loader import TelemetryData
 from pathlib import Path
 from src.telemetry.recorder import ACTelemetryStream
-from src.telemetry.loader import TelemetryLoader
+from src.telemetry.loader import TelemetryData, TelemetryLoader
 from src.analysis.delta import (
     calculate_time_delta,
     calculate_delta_statistics,
@@ -17,7 +21,12 @@ from src.ui.plots import plot_comprehensive_analysis, plot_corner_analysis, save
 import matplotlib.pyplot as plt
 
 
+
+best_lap_data = None
+best_lap_corners = []
+
 def live_mode():
+    global coach
     print("=" * 60)
     print("SRLTA - Live Mode")
     print("=" * 60)
@@ -26,6 +35,23 @@ def live_mode():
 
     from src.voice.speaker import Speaker
     speaker = Speaker()
+    coach = RealTimeCoach(speaker)
+    def settings_listener():
+        speaker.print_status()
+        print("  Controls: T=voice  M=mode  +/-=volume  [/]=rate  ?=status\n")
+        while True:
+            cmd = input().strip().lower()
+            if   cmd == "t":         speaker.toggle_voice()
+            elif cmd == "m":         speaker.cycle_mode()
+            elif cmd == "+":         speaker.set_volume(speaker.volume + 0.1)
+            elif cmd == "-":         speaker.set_volume(speaker.volume - 0.1)
+            elif cmd == "[":         speaker.set_rate(speaker.rate - 10)
+            elif cmd == "]":         speaker.set_rate(speaker.rate + 10)
+            elif cmd == "?":         speaker.print_status()
+
+    import threading
+    threading.Thread(target=settings_listener, daemon=True).start()
+
     speaker.test()  # confirms voice is working when you start
 
     stream = ACTelemetryStream()
@@ -33,48 +59,70 @@ def live_mode():
     lap_number = 1
 
     def on_frame(frame):
-        print(f"\r  Speed: {frame['speed']:6.1f} km/h  "
-              f"Dist: {frame['distance']:6.0f}m  "
-              f"Lap: {frame['lap']}  "
-              f"Time: {frame['lap_time']:.1f}s", end="")
+        global best_lap_data, best_lap_corners
+
+        if best_lap_data and best_lap_corners:
+            coach.update(frame, best_lap_data, best_lap_corners)
 
     def on_lap_complete(frames):
-        nonlocal lap_number, best_lap_path
+        global lap_number, best_lap_data, best_lap_corners
+
+        current = TelemetryData(frames)
+
         print(f"\n\n✓ Lap {lap_number} complete — {len(frames)} frames recorded")
-        
+
         lap_path = f"data/lap_{lap_number}.csv"
         stream.save_lap(frames, lap_path)
 
+        # --- Detect corners ONCE ---
+        corners = detect_corners_advanced(current, method="multi_channel")
+        print(f"[INFO] Corners detected: {len(corners)}")
+
+        # --- Compare laps ---
         if Path(best_lap_path).exists():
-            print("  Comparing to best lap...")
             try:
                 ref = TelemetryLoader.load(best_lap_path)
-                current = TelemetryLoader.load(lap_path)
-                distances, delta = calculate_time_delta(ref, current)
+                new_lap = TelemetryLoader.load(lap_path)
+
+                distances, delta = calculate_time_delta(ref, new_lap)
                 stats = calculate_delta_statistics(delta, distances)
                 zones = find_significant_delta_zones(delta, distances)
 
-                # Print to terminal
-                coaching = generate_coaching_message(stats, zones)
-                print(coaching)
-
-                # Speak it
+                print(generate_coaching_message(stats, zones))
                 speaker.say_lap_result(stats, zones)
 
-                # Update best lap if this one is faster
-                if stats['total_delta'] < 0:
+                # --- CORNER ANALYSIS (ONLY ONCE) ---
+                if len(corners) > 0:
+                    corner_perf = analyze_corner_performance(ref, new_lap, corners)
+
+                    print(f"[INFO] Corner performance entries: {len(corner_perf)}")
+
+                    speaker.say_corner_coaching(corner_perf)
+                else:
+                    print("[INFO] No corners detected this lap")
+
+                # --- update best lap ---
+                if stats["total_delta"] < 0:
                     import shutil
                     shutil.copy(lap_path, best_lap_path)
                     print("  New best lap saved!")
-                    #speaker.say("New best lap!", interrupt=False)
+
+                best_lap_data = ref
+                best_lap_corners = corners
+                coach.reset()
 
             except Exception as e:
                 print(f"  Could not compare: {e}")
+
         else:
             import shutil
             shutil.copy(lap_path, best_lap_path)
-            print("  First lap saved as reference. Drive another lap to compare!")
-            speaker.say("First lap recorded. Drive another lap to compare.")
+            print("  First lap saved as reference.")
+            speaker.say("First lap recorded.")
+
+            best_lap_data = current
+            best_lap_corners = corners
+            coach.reset()
 
         lap_number += 1
 
